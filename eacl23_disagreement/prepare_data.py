@@ -2,9 +2,10 @@
 """Normalize MD-Agreement data for MaChAmp."""
 
 import argparse
-import csv
+import pandas as pd
 import os
 import re
+import csv
 from collections import Counter
 
 
@@ -45,13 +46,6 @@ def _majority_and_agreement(labels):
     else:
         raise ValueError(f"Unexpected vote distribution: {counts}")
     return majority_label, agreement
-
-
-def _read_dict(path, sep=None):
-    """Yield rows from CSV/TSV as dictionaries."""
-    delimiter = sep or _sniff_sep(path)
-    with open(path, encoding="utf8", newline="") as handle:
-        yield from csv.DictReader(handle, delimiter=delimiter)
 
 
 ID_DIGITS = re.compile(r"^(\d+)")
@@ -155,14 +149,15 @@ def load_taxonomy(tax_path):
     if not tax_path or not os.path.exists(tax_path):
         return {}
 
-    delimiter = _sniff_sep(tax_path)
     taxonomy = {}
-    for row in _read_dict(tax_path, sep=delimiter):
+    df = pd.read_csv(tax_path, delimiter="\t", header=0)
+    for _, row in df.iterrows():
         base_id, split = _split_identifier(row.get("ID"))
         if not base_id:
             continue
 
         key = (base_id, split or None)
+        row = row.fillna("")
         taxonomy[key] = {
             "text": (row.get("Text") or "").strip(),
             "agr": (row.get("Agreement_level") or "").strip(),
@@ -189,7 +184,7 @@ def process_split(
 ):
     """Convert a raw MD-Agreement split into MaChAmp TSV format."""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    delimiter = _sniff_sep(in_path)
+    delimiter = "\t"
 
     expected_split = _normalize_split_name(expected_split)
 
@@ -210,8 +205,9 @@ def process_split(
     with open(in_path, encoding="utf8", newline="") as in_handle, open(
         out_path, "w", encoding="utf8"
     ) as out_handle:
-        reader = csv.DictReader(in_handle, delimiter=delimiter)
-        for row in reader:
+        print(in_path)
+        reader = pd.read_csv(in_path, delimiter=delimiter, quoting=csv.QUOTE_NONE)
+        for _, row in reader.iterrows():
             tweet_id, row_split = _split_identifier(row.get(id_col))
             if expected_split:
                 if row_split and row_split != expected_split:
@@ -228,6 +224,8 @@ def process_split(
 
             offensive = None
             gold_agreement = None
+            if row.get(gold_col) in (None, ""):
+                print(row)
             if gold_col and row.get(gold_col) not in (None, ""):
                 gold_raw = str(row[gold_col]).strip()
                 gold_votes = _parse_annotation_sequence(gold_raw)
