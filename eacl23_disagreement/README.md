@@ -16,12 +16,14 @@ Request/download MD-Agreement and MD-Agreement-v2 (taxonomy) from the authors’
      --dev_csv   /path/to/MD-Agreement/dev.csv \
      --test_csv  /path/to/MD-Agreement/test.csv \
      --taxonomy_path /path/to/MD-Agreement-v2/Category_dataset.tsv \
-     --id_col tweet_id --text_col text \
-     --gold_col gold_label_or_empty --agr_col agreement_or_empty \
-     --ann_cols ann1 ann2 ann3 ann4 ann5 \
      --prefer_taxonomy_agr \
      --outdir data/md_agreement
    ```
+
+   The defaults expect the original MD-Agreement columns (`ID`, `Text`,
+   `Agreement_level`, `Offensive_binary_label`, and `Individual_Annotations`).
+   Pass `--id_col`, `--text_col`, `--gold_col`, `--agr_col`, `--ann_cols`, or
+   `--ann_field` to adapt the script to alternative schemas.
 
 2. **Make training variants (Sec. 5.2)**
 

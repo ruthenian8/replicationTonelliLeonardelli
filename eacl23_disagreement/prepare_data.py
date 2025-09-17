@@ -27,15 +27,12 @@ def _norm_off(label):
     raise ValueError(f"Unrecognized label: {label}")
 
 
-def _majority_and_agreement(row, annotator_cols):
+def _majority_and_agreement(labels):
     """Derive majority offensive label and agreement tier."""
-    labels = [
-        _norm_off(row[col])
-        for col in annotator_cols
-        if col in row and str(row[col]).strip() != ""
-    ]
     if len(labels) != 5:
-        raise ValueError("Expected 5 annotator labels to derive majority/agreement.")
+        raise ValueError(
+            f"Expected 5 annotator labels to derive majority/agreement, got {labels}"
+        )
 
     counts = Counter(labels)
     majority_label, majority_votes = counts.most_common(1)[0]
@@ -59,13 +56,98 @@ def _read_dict(path, sep=None):
 
 ID_DIGITS = re.compile(r"^(\d+)")
 
+ANNOT_SPLIT = re.compile(r"[;,/\\|\s]+")
+
+VALID_SPLITS = {"train", "dev", "test"}
+
+SPLIT_ALIASES = {
+    "training": "train",
+    "trainset": "train",
+    "development": "dev",
+    "devset": "dev",
+    "validation": "dev",
+    "val": "dev",
+    "testing": "test",
+}
+
+
+def _normalize_split_name(value):
+    if value is None:
+        return ""
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return ""
+    mapped = SPLIT_ALIASES.get(normalized, normalized)
+    return mapped if mapped in VALID_SPLITS else ""
+
+
+def _split_identifier(identifier):
+    """Return (numeric_id, split_name) parsed from raw identifier."""
+
+    if identifier is None:
+        return "", ""
+
+    text = str(identifier).strip()
+    if not text:
+        return "", ""
+
+    match = ID_DIGITS.match(text)
+    base = match.group(1) if match else text
+
+    split = ""
+    for sep in ("_", "-"):
+        if sep in text:
+            candidate = text.rsplit(sep, 1)[1]
+            split = _normalize_split_name(candidate)
+            if split:
+                break
+            split = ""
+
+    return base, split
+
 
 def _id_base(identifier):
-    if identifier is None:
-        return ""
-    identifier = str(identifier).strip()
-    match = ID_DIGITS.match(identifier)
-    return match.group(1) if match else identifier
+    base, _ = _split_identifier(identifier)
+    return base
+
+
+def _parse_annotation_sequence(value):
+    """Parse comma/space separated annotator labels from a single field."""
+
+    if value is None:
+        return []
+
+    text = str(value).strip()
+    if not text:
+        return []
+
+    # Remove common brackets and quotes.
+    text = text.strip("[](){}\"'")
+    if not text:
+        return []
+
+    parts = [part for part in ANNOT_SPLIT.split(text) if part]
+    if len(parts) <= 1:
+        return []
+
+    return [_norm_off(part) for part in parts]
+
+
+def _collect_votes(row, annotator_cols=None, annotations_field=None):
+    """Collect annotator votes either from dedicated columns or a single field."""
+
+    if annotator_cols:
+        votes = []
+        for col in annotator_cols:
+            if col not in row or row[col] is None or str(row[col]).strip() == "":
+                raise ValueError(f"Missing annotator column '{col}' in row {row}")
+            votes.append(_norm_off(row[col]))
+        return votes
+
+    if annotations_field:
+        return _parse_annotation_sequence(row.get(annotations_field))
+
+    return []
 
 
 def load_taxonomy(tax_path):
@@ -76,8 +158,12 @@ def load_taxonomy(tax_path):
     delimiter = _sniff_sep(tax_path)
     taxonomy = {}
     for row in _read_dict(tax_path, sep=delimiter):
-        tweet_id = _id_base(row.get("ID"))
-        taxonomy[tweet_id] = {
+        base_id, split = _split_identifier(row.get("ID"))
+        if not base_id:
+            continue
+
+        key = (base_id, split or None)
+        taxonomy[key] = {
             "text": (row.get("Text") or "").strip(),
             "agr": (row.get("Agreement_level") or "").strip(),
             "primary_cat": (row.get("Primary_category") or "").strip(),
@@ -97,39 +183,86 @@ def process_split(
     gold_col=None,
     agr_col=None,
     ann_cols=None,
+    ann_field=None,
     prefer_taxonomy_agr=True,
+    expected_split=None,
 ):
     """Convert a raw MD-Agreement split into MaChAmp TSV format."""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     delimiter = _sniff_sep(in_path)
+
+    expected_split = _normalize_split_name(expected_split)
+
+    def lookup_taxonomy(base_id, split_name):
+        if not base_id:
+            return {}
+
+        key_specific = (base_id, split_name or None)
+        if key_specific in taxonomy:
+            return taxonomy[key_specific]
+
+        if split_name:
+            fallback_key = (base_id, None)
+            return taxonomy.get(fallback_key, {})
+
+        return {}
 
     with open(in_path, encoding="utf8", newline="") as in_handle, open(
         out_path, "w", encoding="utf8"
     ) as out_handle:
         reader = csv.DictReader(in_handle, delimiter=delimiter)
         for row in reader:
-            tweet_id = _id_base(row.get(id_col))
+            tweet_id, row_split = _split_identifier(row.get(id_col))
+            if expected_split:
+                if row_split and row_split != expected_split:
+                    continue
+                row_split = row_split or expected_split
+
             text = (row.get(text_col) or "").replace("\n", " ").strip()
 
-            if gold_col and row.get(gold_col, "") != "":
-                offensive = _norm_off(row[gold_col])
-            elif ann_cols:
-                offensive, _ = _majority_and_agreement(row, ann_cols)
-            else:
-                raise ValueError("Need --gold_col or --ann_cols to derive OFF/NOT.")
+            votes = _collect_votes(row, ann_cols, ann_field)
+            derived_offensive = None
+            derived_agreement = None
+            if votes:
+                derived_offensive, derived_agreement = _majority_and_agreement(votes)
 
-            if prefer_taxonomy_agr and tweet_id in taxonomy and taxonomy[tweet_id]["agr"]:
-                agreement = taxonomy[tweet_id]["agr"]
-            elif agr_col and row.get(agr_col, "") != "":
-                agreement = row[agr_col].strip()
-            elif ann_cols:
-                _, agreement = _majority_and_agreement(row, ann_cols)
+            offensive = None
+            gold_agreement = None
+            if gold_col and row.get(gold_col) not in (None, ""):
+                gold_raw = str(row[gold_col]).strip()
+                gold_votes = _parse_annotation_sequence(gold_raw)
+                if gold_votes:
+                    if len(gold_votes) != 5:
+                        raise ValueError(
+                            f"Expected 5 annotator labels in '{gold_col}', got {gold_votes}"
+                        )
+                    offensive, gold_agreement = _majority_and_agreement(gold_votes)
+                    if not votes:
+                        derived_offensive, derived_agreement = offensive, gold_agreement
+                else:
+                    offensive = _norm_off(gold_raw)
+
+            if offensive is None and derived_offensive is not None:
+                offensive = derived_offensive
+
+            if offensive is None:
+                raise ValueError("Need gold or annotator labels to derive OFF/NOT.")
+
+            info = lookup_taxonomy(tweet_id, row_split)
+
+            if prefer_taxonomy_agr and info.get("agr"):
+                agreement = info["agr"]
+            elif agr_col and row.get(agr_col) not in (None, ""):
+                agreement = str(row[agr_col]).strip()
+            elif gold_agreement is not None:
+                agreement = gold_agreement
+            elif derived_agreement is not None:
+                agreement = derived_agreement
             else:
                 agreement = ""
 
             agr6 = f"{agreement}_{offensive}" if agreement else ""
 
-            info = taxonomy.get(tweet_id, {})
             main_cat = info.get("primary_cat", "")
             subtype = info.get("primary_subcat", "")
             secondary_cat = info.get("secondary_cat", "")
@@ -160,16 +293,16 @@ def main():
         required=True,
         help="Path to Category_dataset.tsv (taxonomy annotations)",
     )
-    parser.add_argument("--id_col", default="tweet_id")
-    parser.add_argument("--text_col", default="text")
+    parser.add_argument("--id_col", default="ID")
+    parser.add_argument("--text_col", default="Text")
     parser.add_argument(
         "--gold_col",
-        default=None,
+        default="Offensive_binary_label",
         help="Column containing gold OFF/NOT labels (optional if deriving from annotators)",
     )
     parser.add_argument(
         "--agr_col",
-        default=None,
+        default="Agreement_level",
         help="Column containing agreement labels (A++/A+/A0), optional",
     )
     parser.add_argument(
@@ -177,6 +310,11 @@ def main():
         nargs="*",
         default=None,
         help="Names of five annotator columns to derive labels if needed",
+    )
+    parser.add_argument(
+        "--ann_field",
+        default="Individual_Annotations",
+        help="Column containing comma-separated annotator labels (if not using --ann_cols)",
     )
     parser.add_argument(
         "--prefer_taxonomy_agr",
@@ -198,7 +336,9 @@ def main():
         args.gold_col,
         args.agr_col,
         args.ann_cols,
+        args.ann_field,
         args.prefer_taxonomy_agr,
+        expected_split="train",
     )
     process_split(
         args.dev_csv,
@@ -209,7 +349,9 @@ def main():
         args.gold_col,
         args.agr_col,
         args.ann_cols,
+        args.ann_field,
         args.prefer_taxonomy_agr,
+        expected_split="dev",
     )
     process_split(
         args.test_csv,
@@ -220,7 +362,9 @@ def main():
         args.gold_col,
         args.agr_col,
         args.ann_cols,
+        args.ann_field,
         args.prefer_taxonomy_agr,
+        expected_split="test",
     )
 
 
