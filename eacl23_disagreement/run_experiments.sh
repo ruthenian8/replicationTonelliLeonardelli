@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MACHAMP_DIR=${MACHAMP_DIR:-"$ROOT/../machamp"}
-PARAMS="$ROOT/params-bert-base-uncased.json"
-BASE="$ROOT/data/md_agreement"
-SPLITS="$ROOT/data/splits"
+MACHAMP_DIR="/content/machamp"
+PARAMS="/content/replicationTonelliLeonardelli/machamp/configs/params.json"
+BASE="/content/data/md_agreement"
+SPLITS="/content/data/splits"
 OUT="$ROOT/results"
 CONFIG_DIR="$ROOT/configs"
 
